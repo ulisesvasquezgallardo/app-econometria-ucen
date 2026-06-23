@@ -50,7 +50,7 @@ st.sidebar.markdown("""
 * Nicolas Asperti
 """)
 st.sidebar.markdown(
-    "<div style='text-align: center; color: gray; font-size: 12px;'>Universidad Central de Chile © 2024</div>",
+    "<div style='text-align: center; color: gray; font-size: 12px;'>Universidad Central de Chile © 2026</div>",
     unsafe_allow_html=True)
 
 
