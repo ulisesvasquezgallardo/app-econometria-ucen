@@ -11,7 +11,6 @@ st.set_page_config(page_title="Análisis de Multicolinealidad", layout="wide")
 # ==============================================================================
 # INICIALIZACIÓN DE MEMORIA (SESSION STATE)
 # ==============================================================================
-# Esto evita que los datos se borren al hacer clic en los botones
 if 'df_confirmado' not in st.session_state:
     st.session_state.df_confirmado = None
 if 'metodo_anterior' not in st.session_state:
@@ -29,7 +28,6 @@ st.sidebar.markdown("---")
 st.sidebar.header("Opciones de Entrada de Datos")
 metodo = st.sidebar.radio("📥 Elige cómo cargar los datos:", ["Subir archivo CSV", "Ingresar datos manualmente"])
 
-# Si el usuario cambia de método, borramos la memoria para evitar cruce de datos
 if metodo != st.session_state.metodo_anterior:
     st.session_state.df_confirmado = None
     st.session_state.metodo_anterior = metodo
@@ -68,7 +66,7 @@ def generar_tabla_eviews(modelo, dep_var):
     ssr = modelo.ssr
     log_lik = modelo.llf
     f_stat = modelo.fvalue
-    prob_f = modelo.f_pvalue
+    prob_f = modelo.f_pvalue if modelo.f_pvalue is not None else np.nan
     mean_dep = modelo.model.endog.mean()
     sd_dep = modelo.model.endog.std(ddof=1)
     aic = modelo.aic
@@ -154,7 +152,6 @@ if metodo == "Subir archivo CSV":
         df = pd.read_csv(uploaded_file, sep=separador, decimal=decimales)
         df = df.apply(pd.to_numeric, errors='coerce')
 
-        # ⚠️ Verificación de datos faltantes en el CSV
         nulos_csv = df.isnull().sum().sum()
         if nulos_csv > 0:
             st.warning(
@@ -169,21 +166,16 @@ elif metodo == "Ingresar datos manualmente":
     st.info(
         "1. Define los nombres de tus variables abajo.\n2. Rellena los datos en la tabla (puedes agregar filas arrastrando o en la esquina inferior).\n3. Presiona el botón de confirmar.")
 
-    # Campo para que el usuario nombre sus variables a su gusto
     nombres_cols = st.text_input("✏️ Nombres de las columnas (separados por coma):", "Y, X1, X2, X3")
     cols_list = [c.strip() for c in nombres_cols.split(",") if c.strip() != ""]
 
-    # Generar tabla base interactiva
     if "tabla_manual" not in st.session_state or list(st.session_state.tabla_manual.columns) != cols_list:
-        st.session_state.tabla_manual = pd.DataFrame(columns=cols_list, index=range(12))  # 12 filas por defecto
+        st.session_state.tabla_manual = pd.DataFrame(columns=cols_list, index=range(12))
 
     df_manual = st.data_editor(st.session_state.tabla_manual, num_rows="dynamic", use_container_width=True)
 
     if st.button("✅ Confirmar Datos e Iniciar Análisis"):
-        # Limpiar filas donde absolutamente todo esté vacío
         df_limpio = df_manual.dropna(how='all')
-
-        # ⚠️ Validaciones de integridad
         if df_limpio.empty:
             st.error("⚠️ La tabla está completamente vacía. Ingresa datos antes de continuar.")
         elif df_limpio.isnull().values.any():
@@ -195,7 +187,6 @@ elif metodo == "Ingresar datos manualmente":
                 f"⚠️ Error: Tienes {len(cols_list)} variables pero solo {len(df_limpio)} observaciones. ¡Los grados de libertad deben ser positivos!")
         else:
             try:
-                # Convertir comas tipeadas por error a puntos y forzar a números
                 df_limpio = df_limpio.replace(',', '.', regex=True).astype(float)
                 st.session_state.df_confirmado = df_limpio
                 st.success("¡Datos guardados con éxito! Desplázate hacia abajo para configurar el modelo.")
@@ -285,109 +276,146 @@ if df_listo is not None:
 
             # 4. Regresiones Auxiliares y Test F
             st.write("---")
-            st.header("4. Regresiones Auxiliares (Test F)")
+            st.header("4. Regresiones Auxiliares (Test F) y Regla de Klein")
 
             n = len(Y)
             k = len(indep_vars) + 1
             alpha = 0.05
-            f_tabla = stats.f.ppf(1 - alpha, k - 2, n - k + 1)
 
-            st.write(f"**Parámetros de prueba:** n = {n}, k = {k}, Nivel de significancia = {alpha * 100}%")
-            st.write(f"**F Tabla:** {f_tabla:.5f}")
+            if (k - 2) > 0 and (n - k + 1) > 0:
+                f_tabla = stats.f.ppf(1 - alpha, k - 2, n - k + 1)
+                st.write(f"**Parámetros de prueba:** n = {n}, k = {k}, Nivel de significancia = {alpha * 100}%")
+                st.write(f"**F Tabla:** {f_tabla:.5f}")
+                st.write(f"**R-cuadrado Modelo Global:** {r_squared:.5f}")
 
-            f_results = []
-            tol_results = []
-            problema_fuerte = False
+                f_results = []
+                tol_results = []
+                problema_fuerte = False
+                tol_severo_detectado = False
+                klein_severo_detectado = False
 
-            for i, col in enumerate(indep_vars):
-                st.subheader(f"Regresión Auxiliar: {col} contra las restantes Xs")
-                y_aux = X[col]
-                x_aux_cols = [c for c in indep_vars if c != col]
-                x_aux = sm.add_constant(X[x_aux_cols])
+                for i, col in enumerate(indep_vars):
+                    st.subheader(f"Regresión Auxiliar: {col} contra las restantes Xs")
+                    y_aux = X[col]
+                    x_aux_cols = [c for c in indep_vars if c != col]
+                    x_aux = sm.add_constant(X[x_aux_cols])
 
-                model_aux = sm.OLS(y_aux, x_aux).fit()
-                st.markdown(generar_tabla_eviews(model_aux, col), unsafe_allow_html=True)
+                    model_aux = sm.OLS(y_aux, x_aux).fit()
+                    st.markdown(generar_tabla_eviews(model_aux, col), unsafe_allow_html=True)
 
-                r2_aux = model_aux.rsquared
-                f_calc = (r2_aux / (k - 2)) / ((1 - r2_aux) / (n - k + 1)) if r2_aux < 1 else float('inf')
+                    r2_aux = model_aux.rsquared
 
-                decision_f = "Variable es altamente colineal" if f_calc > f_tabla else "Variable no es colineal"
-                if f_calc > f_tabla: problema_fuerte = True
+                    if r2_aux < 1.0 and r2_aux > 0:
+                        f_calc = (r2_aux / (k - 2)) / ((1 - r2_aux) / (n - k + 1))
+                    elif r2_aux >= 1.0:
+                        f_calc = float('inf')
+                    else:
+                        f_calc = 0.0
 
-                f_results.append({
-                    "Estimador": f"R-Cuadrado {col}.restantes",
-                    "R^2": round(r2_aux, 6),
-                    "F Calculado": round(f_calc, 5),
-                    "F Tabla": round(f_tabla, 5),
-                    "Decisión F": decision_f
-                })
+                    decision_f = "Variable es altamente colineal" if f_calc > f_tabla else "Variable no es colineal"
+                    if f_calc > f_tabla:
+                        problema_fuerte = True
 
-                tol_i = 1 - r2_aux
-                fiv_i = 1 / tol_i if tol_i > 0 else float('inf')
+                    decision_klein = "Problema Severo (R² aux > R² modelo)" if r2_aux > r_squared else "Normal"
+                    if r2_aux > r_squared:
+                        klein_severo_detectado = True
 
-                if fiv_i > 10:
-                    decision_tol = "Variable de Alta Colinealidad"
-                elif tol_i >= 0.8:
-                    decision_tol = "Variable No Esta Relacionada"
+                    f_results.append({
+                        "Estimador": f"R² {col}.restantes",
+                        "R² Auxiliar": round(r2_aux, 6),
+                        "F Calculado": round(f_calc, 5) if f_calc != float('inf') else "Infinito",
+                        "Decisión F": decision_f,
+                        "Regla de Klein": decision_klein
+                    })
+
+                    tol_i = 1 - r2_aux
+                    fiv_i = 1 / tol_i if tol_i > 0 else float('inf')
+
+                    # NUEVA CLASIFICACIÓN DE TOLERANCIA (TOL) - Ajustada a la teoría del PDF
+                    if tol_i < 0.10:
+                        decision_tol = "Colinealidad SEVERA"
+                        tol_severo_detectado = True
+                    elif 0.10 <= tol_i <= 0.70:
+                        decision_tol = "Variable de Colinealidad Normal"
+                    else:
+                        decision_tol = "Variable No Esta Relacionada"
+
+                    tol_results.append({
+                        "Variable": col,
+                        "R-Cuadrado Auxiliar": round(r2_aux, 6),
+                        "TOL_i": round(tol_i, 6),
+                        "FIV_i": round(fiv_i, 6) if fiv_i != float('inf') else "Infinito",
+                        "Decisión": decision_tol
+                    })
+
+                st.write("**Resumen de Regresiones Auxiliares:**")
+                st.table(pd.DataFrame(f_results).astype(str))
+
+                with st.expander("📖 Ver justificación teórica (Regresiones Auxiliares y Regla de Klein)"):
+                    st.write("""
+                    **Regresiones Auxiliares (Test F):**
+                    Se toma cada variable independiente y se hace 'dependiente' del resto de regresores para detectar colinealidad compleja. 
+                    Si el $F$ calculado es mayor que el $F$ crítico de la tabla, se rechaza la hipótesis nula, demostrando que la variable está explicada por el resto del modelo.
+
+                    **Regla Práctica de Klein:**
+                    Dice que si el $R^2$ de la regresión auxiliar es mayor que el $R^2$ del modelo original global, la multicolinealidad es un problema severo.
+                    """)
+
+                # 5. Test TOL
+                st.write("---")
+                st.header("5. Índice de Tolerancia (TOL) e Inflación de Varianza (FIV)")
+                st.table(pd.DataFrame(tol_results).astype(str))
+
+                with st.expander("📖 Ver justificación teórica sobre TOL y FIV"):
+                    st.write("""
+                    **TOL y FIV:**
+                    * **TOL (Índice de Tolerancia):** Mide qué proporción de la varianza de una variable explicativa NO está influenciada o explicada por las demás variables ($TOL = 1 - R^2_{auxiliar}$).
+                    * **FIV (Factor de Inflación de Varianza):** Es el inverso del TOL ($FIV = 1 / TOL$). Muestra cuántas veces se infla la varianza del coeficiente estimado.
+
+                    **Escala de Decisión Econométrica:**
+                    * **TOL < 0.10 (FIV > 10):** Colinealidad SEVERA. La variable está críticamente amarrada a las demás.
+                    * **0.10 ≤ TOL ≤ 0.70:** Colinealidad Normal. Escenario común y tolerable.
+                    * **TOL > 0.70:** Variable No Está Relacionada.
+                    """)
+
+                # ==============================================================================
+                # 6. Conclusión Final
+                # ==============================================================================
+                st.write("---")
+                st.header("Conclusión Final del Análisis")
+
+                # Caso 1: El problema es realmente grave (Síntoma clásico activo, TOL crítico, o Regla de Klein rota)
+                if tol_severo_detectado or multicolinealidad_sintoma or klein_severo_detectado:
+                    st.error(
+                        "❌ Conclusión: De acuerdo a las pruebas desarrolladas, el modelo analizado PRESENTA PROBLEMAS DE MULTICOLINEALIDAD SEVERA O FUERTE. "
+                        "Los estimadores individuales son inestables y los errores estándar están inflados artificialmente.")
+
+                # Caso 2: Hay colinealidad estadísticamente demostrada por el Test F, pero su magnitud es inofensiva
+                elif problema_fuerte:
+                    st.warning(
+                        "⚠️ Conclusión: Se detectó colinealidad estadísticamente significativa mediante las regresiones auxiliares (Test F). "
+                        "Sin embargo, de acuerdo a los índices TOL/FIV y la Regla de Klein, la magnitud del problema es NORMAL. "
+                        "El modelo es utilizable y las estimaciones son estables.")
+
+                # Caso 3: No hay absolutamente nada de colinealidad
                 else:
-                    decision_tol = "Variable de Colinealidad Normal"
+                    st.success(
+                        "✅ Conclusión: De acuerdo a las pruebas desarrolladas, el modelo analizado está SIN PROBLEMAS de multicolinealidad. "
+                        "Las variables explicativas aportan información independiente al modelo.")
 
-                tol_results.append({
-                    "Variable": col,
-                    "R-Cuadrado Auxiliar": round(r2_aux, 6),
-                    "TOL_i": round(tol_i, 6),
-                    "Decisión": decision_tol
-                })
+                with st.expander("⚠️ Consecuencias prácticas y posibles soluciones"):
+                    st.write("""
+                    **¿Qué pasa si el modelo tiene multicolinealidad severa?**
+                    Aunque los estimadores MCO siguen siendo Insesgados, el problema principal radica en sus varianzas:
+                    1.  **Varianzas infladas:** Los intervalos de confianza se vuelven demasiado amplios.
+                    2.  **Pérdida de significancia:** Los estadísticos $t$ disminuyen, por lo que es probable que consideres incorrectamente que una variable "no importa" cuando sí lo hace.
+                    3.  **Inestabilidad:** Cambiar o quitar una sola observación de tus datos, o agregar una variable más, hará que los coeficientes den saltos drásticos.
 
-            st.write("**Resumen Test F para determinar Multicolinealidad Severa:**")
-            st.table(pd.DataFrame(f_results), hide_index=True)
-
-            with st.expander("📖 Ver justificación teórica de las Regresiones Auxiliares"):
-                st.write("""
-                **¿Por qué hacemos regresiones de las X contra las X?**
-                Para detectar colinealidad compleja (entre 3 o más variables simultáneamente). Se toma cada variable independiente y se hace 'dependiente' del resto de regresores.
-
-                Luego, aplicamos una prueba global (Prueba F). Si el $F$ calculado es mayor que el $F$ crítico de la tabla, rechazamos la hipótesis nula de que los coeficientes son cero. 
-                Estadísticamente, esto demuestra que esa variable específica está altamente explicada (es colineal) por la combinación lineal del resto de las variables en el modelo.
-                """)
-
-            # 5. Test TOL
-            st.write("---")
-            st.header("5. Índice de Tolerancia (TOL) e Inflación de Varianza (FIV)")
-            st.table(pd.DataFrame(tol_results), hide_index=True)
-
-            with st.expander("📖 Ver justificación teórica sobre TOL y FIV"):
-                st.write("""
-                **TOL y FIV:**
-                * **TOL (Índice de Tolerancia):** Mide qué proporción de la varianza de una variable explicativa NO está influenciada o explicada por las demás variables ($TOL = 1 - R^2_{auxiliar}$).
-                * **FIV (Factor de Inflación de Varianza):** Es el inverso del TOL ($FIV = 1 / TOL$). Muestra cuántas veces se infla la varianza del coeficiente estimado respecto a un modelo sin colinealidad.
-
-                **Reglas de Decisión:**
-                * Si **FIV = 1 (TOL = 1):** Las variables no están correlacionadas en absoluto.
-                * Si **FIV > 10 (TOL < 0.1):** Umbral crítico empírico. Indica que la multicolinealidad es grave y los estimadores son altamente inestables y poco confiables.
-                """)
-
-            # 6. Conclusión Final
-            st.write("---")
-            st.header("Conclusión Final del Análisis")
-
-            if problema_fuerte or multicolinealidad_sintoma:
-                st.error(
-                    "Conclusión: De acuerdo a las pruebas desarrolladas, el modelo analizado ESTARÍA CON PROBLEMAS de multicolinealidad severa o fuerte.")
+                    **Posibles soluciones sugeridas:**
+                    * **Aumentar el tamaño de la muestra:** Traer más datos aporta más variabilidad y puede romper el efecto de colinealidad.
+                    * **Eliminar variables:** Quitar la variable más colineal (¡Cuidado! Esto podría introducir sesgo por variable omitida).
+                    * **Transformar las variables:** Utilizar ratios o primeras diferencias.
+                    """)
             else:
-                st.success(
-                    "Conclusión: De acuerdo a las pruebas desarrolladas, el modelo analizado estaría SIN PROBLEMAS de multicolinealidad severa o fuerte.")
-
-            with st.expander("⚠️ Consecuencias prácticas y posibles soluciones"):
-                st.write("""
-                **¿Qué pasa si el modelo tiene multicolinealidad severa?**
-                Aunque los estimadores MCO siguen siendo Insesgados, el problema principal radica en sus varianzas:
-                1.  **Varianzas infladas:** Los intervalos de confianza se vuelven demasiado amplios.
-                2.  **Pérdida de significancia:** Los estadísticos $t$ disminuyen, por lo que es probable que consideres incorrectamente que una variable "no importa" cuando sí lo hace.
-                3.  **Inestabilidad:** Cambiar o quitar una sola observación de tus datos, o agregar una variable más, hará que los coeficientes den saltos drásticos (incluso cambiando de signo positivo a negativo).
-
-                **Posibles soluciones sugeridas:**
-                * **Aumentar el tamaño de la muestra:** Traer más datos aporta más variabilidad y puede romper el efecto de colinealidad.
-                * **Eliminar variables:** Quitar la variable más colineal (¡Cuidado! Esto podría introducir sesgo por variable omitida).
-                * **Transformar las variables:** Utilizar primeras diferencias, razones, logaritmos, o usar componentes principales para agrupar variables similares.
-                """)
+                st.error(
+                    "⚠️ No hay suficientes grados de libertad para calcular el Test F de las regresiones auxiliares. Por favor, asegúrate de tener más observaciones que variables.")
